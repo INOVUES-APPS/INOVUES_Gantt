@@ -662,6 +662,11 @@ with st.sidebar:
         st.error(f"❌ Could not connect to Odoo: {e}")
         st.stop()
 
+    # In Progress projects first, then the rest. Python's sort is "stable", so Odoo's
+    # alphabetical order is kept inside each group. This one list drives the sidebar,
+    # the chart rows, the PNG and the color assignment.
+    projects = sorted(projects, key=lambda p: not is_default_project(p))
+
     all_project_ids   = [p["id"] for p in projects]
     all_project_names = {p["id"]: p["name"] for p in projects}
     default_ids       = {p["id"] for p in projects if is_default_project(p)}
@@ -692,7 +697,11 @@ with st.sidebar:
     else:
         st.warning("No Odoo projects are in the 'In Progress' stage right now.")
 
+    shown_other_label = False
     for pid in all_project_ids:
+        if default_ids and pid not in default_ids and not shown_other_label:
+            st.caption("Other projects")
+            shown_other_label = True
         st.checkbox(all_project_names[pid], key=f"proj_{pid}")
 
     selected_ids = {pid for pid in all_project_ids if st.session_state.get(f"proj_{pid}")}
