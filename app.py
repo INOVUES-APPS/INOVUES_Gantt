@@ -111,7 +111,22 @@ elif action == "delete_link":
 @st.cache_data(ttl=60)
 def load_projects():
     return odoo_rpc("project.project", "search_read", [[]],
-                    {"fields": ["name", "task_count"], "order": "name asc"})
+                    {"fields": ["name", "task_count", "stage_id"], "order": "name asc"})
+
+
+# Project stage (column on the Odoo Projects board) shown by default
+DEFAULT_PROJECT_STAGE = "in progress"
+
+
+def project_stage_name(proj) -> str:
+    """Odoo returns stage_id as [id, "Name"] or False when the project has no stage."""
+    stage = proj.get("stage_id")
+    return stage[1] if stage else ""
+
+
+def is_default_project(proj) -> bool:
+    """True when the project sits in the 'In Progress' column (case/spacing tolerant)."""
+    return DEFAULT_PROJECT_STAGE in " ".join(project_stage_name(proj).lower().split())
 
 @st.cache_data(ttl=60)
 def load_tasks():
@@ -223,10 +238,13 @@ def build_gantt_data(projects, tasks, selected_project_ids):
 
 
 # ─── Server-side PNG export ──────────────────────────────────────
-def render_gantt_png(projects, tasks):
+def render_gantt_png(projects, tasks, selected_project_ids):
+    # Colors are assigned from the FULL project list so they match the on-screen chart
     full_color_map = {}
     for i, proj in enumerate(projects):
         full_color_map[proj["id"]] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
+    # Then keep only the projects ticked in the sidebar
+    projects = [p for p in projects if p["id"] in selected_project_ids]
 
     proj_task_map = {}
     for task in tasks:
@@ -646,27 +664,38 @@ with st.sidebar:
 
     all_project_ids   = [p["id"] for p in projects]
     all_project_names = {p["id"]: p["name"] for p in projects}
+    default_ids       = {p["id"] for p in projects if is_default_project(p)}
 
-    if "selected_projects" not in st.session_state:
-        st.session_state.selected_projects = all_project_ids[:]
+    # Each checkbox remembers its own state under the key "proj_<id>".
+    # First visit (or a project new since the last refresh): tick it only if In Progress.
+    for pid in all_project_ids:
+        st.session_state.setdefault(f"proj_{pid}", pid in default_ids)
 
+    # Quick-pick buttons set the checkbox keys directly. They run as callbacks,
+    # i.e. before the page redraws, which is the only time Streamlit allows this.
+    def _select(ids):
+        for pid in all_project_ids:
+            st.session_state[f"proj_{pid}"] = pid in ids
+
+    st.button("In Progress", use_container_width=True, type="primary",
+              on_click=_select, args=(default_ids,))
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("All",  use_container_width=True):
-            st.session_state.selected_projects = all_project_ids[:]
-            st.rerun()
+        st.button("All", use_container_width=True,
+                  on_click=_select, args=(set(all_project_ids),))
     with col2:
-        if st.button("None", use_container_width=True):
-            st.session_state.selected_projects = []
-            st.rerun()
+        st.button("None", use_container_width=True,
+                  on_click=_select, args=(set(),))
+
+    if default_ids:
+        st.caption(f"Default view: {len(default_ids)} project(s) in 'In Progress'")
+    else:
+        st.warning("No Odoo projects are in the 'In Progress' stage right now.")
 
     for pid in all_project_ids:
-        checked = pid in st.session_state.selected_projects
-        new_val = st.checkbox(all_project_names[pid], value=checked, key=f"proj_{pid}")
-        if new_val and pid not in st.session_state.selected_projects:
-            st.session_state.selected_projects.append(pid)
-        elif not new_val and pid in st.session_state.selected_projects:
-            st.session_state.selected_projects.remove(pid)
+        st.checkbox(all_project_names[pid], key=f"proj_{pid}")
+
+    selected_ids = {pid for pid in all_project_ids if st.session_state.get(f"proj_{pid}")}
 
     st.markdown("---")
     if st.button("🔄 Refresh from Odoo", use_container_width=True):
@@ -676,10 +705,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 📸 Export")
-    st.caption("All tasks · all projects · ignores filter")
+    st.caption("Exports the projects ticked above")
     if st.button("Generate PNG", use_container_width=True, type="primary"):
-        with st.spinner("Rendering full Gantt…"):
-            png_buf = render_gantt_png(projects, tasks)
+        with st.spinner("Rendering Gantt…"):
+            png_buf = render_gantt_png(projects, tasks, selected_ids)
         if png_buf:
             fname = f"INOVUES_Gantt_{datetime.now().strftime('%Y-%m-%d')}.png"
             st.download_button("⬇️ Download PNG", data=png_buf,
@@ -701,6 +730,11 @@ with st.sidebar:
         for k, v in sorted(stage_counts.items(), key=lambda x: -x[1]):
             st.caption(f"{v}× {k}")
 
+        st.markdown("**Project stages**")
+        for p in projects:
+            mark = "✅" if p["id"] in default_ids else "·"
+            st.caption(f"{mark} {p['name']}: '{project_stage_name(p) or '(none)'}'")
+
 
 # ─── Main render ────────────────────────────────────────────────
 st.markdown("""<style>
@@ -713,10 +747,9 @@ if write_status:
     kind, msg = write_status
     st.toast(msg, icon="✅" if kind == "success" else "❌")
 
-selected_ids = st.session_state.get("selected_projects", all_project_ids)
 gantt_data, gantt_links, missing_dates, color_map = build_gantt_data(
-    projects, tasks, set(selected_ids))
-html = build_gantt_html(gantt_data, gantt_links, color_map, projects, set(selected_ids))
+    projects, tasks, selected_ids)
+html = build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_ids)
 components.html(html, height=750, scrolling=False)
 
 if missing_dates:
